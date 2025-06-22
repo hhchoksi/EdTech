@@ -2,8 +2,9 @@ import User from '../models/User';
 import OTP from '../models/OTP';
 import Profile from '../models/Profile';
 import otpGenerator from 'otp-generator';
-import bcrypt from 'bcryptjs';
+import bcrypt from 'bcrypt';
 import jwt from 'jsonwebtoken';
+import mailSender from '../utils/mailSender';
 
 // Otp Sender 
 export const sendOtp = async (req, res) => {
@@ -12,7 +13,7 @@ export const sendOtp = async (req, res) => {
 
         const isUser = await User.findOne({ email });
 
-        if(isUser) {
+        if (isUser) {
             return res.status(401).json({
                 message: 'User already exists',
                 success: false
@@ -21,17 +22,17 @@ export const sendOtp = async (req, res) => {
 
         let otp = otpGenerator.generate(6, {
             upperCaseAlphabets: false,
-            lowerCaseAlphabets : false,
+            lowerCaseAlphabets: false,
             specialChars: false
         });
         console.log(otp);
 
         let result = await otp.findOne({ otp });
 
-        while(result) {
+        while (result) {
             otp = otpGenerator.generate(6, {
                 upperCaseAlphabets: false,
-                lowerCaseAlphabets : false,
+                lowerCaseAlphabets: false,
                 specialChars: false
             });
 
@@ -46,7 +47,7 @@ export const sendOtp = async (req, res) => {
             message: 'OTP sent successfully',
             success: true
         });
-    } 
+    }
     catch (error) {
         console.log(error);
         res.status(500).json({
@@ -57,7 +58,7 @@ export const sendOtp = async (req, res) => {
 };
 
 //Sign up
-export const signUp = async(req, res) => {
+export const signUp = async (req, res) => {
     try {
         const {
             firstName,
@@ -70,14 +71,14 @@ export const signUp = async(req, res) => {
             otp
         } = req.body;
 
-        if(!firstName || !lastName || !email || !password || !confirmPassword || !otp) {
+        if (!firstName || !lastName || !email || !password || !confirmPassword || !otp) {
             return res.status(403).json({
                 message: 'Please fill all the fields',
                 success: false
             });
         }
 
-        if(password!== confirmPassword) {
+        if (password !== confirmPassword) {
             return res.status(403).json({
                 message: 'Passwords do not match',
                 success: false
@@ -86,24 +87,24 @@ export const signUp = async(req, res) => {
 
         const isUser = await User.findOne({ email });
 
-        if(isUser) {
+        if (isUser) {
             return res.status(401).json({
                 message: 'User already exists',
                 success: false
             });
         }
 
-        const recentOtp = await User.findOne({email}).sort({ createdAt: -1 }).limit(1);
+        const recentOtp = await User.findOne({ email }).sort({ createdAt: -1 }).limit(1);
         console.log(recentOtp);
 
-        if(!recentOtp) {
+        if (!recentOtp) {
             return res.status(401).json({
                 message: 'OTP not found',
                 success: false
             });
         }
 
-        else if(recentOtp.otp!== otp) {
+        else if (recentOtp.otp !== otp) {
             return res.status(401).json({
                 message: 'Invalid OTP',
                 success: false
@@ -134,10 +135,128 @@ export const signUp = async(req, res) => {
             message: 'User created successfully',
             success: true
         });
-    } 
+    }
     catch (error) {
         console.log("Error signing up:", error);
         return res.status(500).json({
+            message: 'Internal Server Error',
+            success: false
+        });
+    }
+};
+
+// Login
+export const login = async (req, res) => {
+    try {
+        const { email, password } = req.body;
+
+        if (!email || !password) {
+            return res.status(403).json({
+                message: 'Please enter required credentials',
+                success: false
+            });
+        }
+
+        const user = await User.findOne({ email }).populate("additionalDetails");
+
+        if (!user) {
+            return res.status(401).json({
+                message: 'User not found',
+                success: false
+            });
+        }
+
+        const isPasswordValid = await bcrypt.compare(password, user.password);
+
+        if (!isPasswordValid) {
+            return res.status(401).json({
+                message: 'Invalid credentials',
+                success: false
+            });
+        }
+
+        const token = jwt.sign(
+            { email: user.email, id: user._id, accountType: user.accountType },
+            process.env.JWT_SECRET,
+            { expiresIn: '1d' }
+        )
+
+        user.token = token;
+        user.password = undefined;
+
+        const options = {
+            expires: new Date(Date.now() + (60 * 60 * 24 * 1000)),
+            httpOnly: true
+        }
+
+        res.cookie('token', token, options).status(200).json({
+            message: 'Logged in successfully',
+            success: true,
+            user
+        });
+
+    }
+    catch (error) {
+        console.log('Error logging in:', error);
+        res.status(500).json({
+            message: 'Internal Server Error',
+            success: false
+        });
+    }
+};
+
+export const changePassword = async (req, res) => {
+    try {
+        const { oldPassword, newPassword, confirmPassword } = req.body;
+
+        const user = await User.findbyId(req.user.id);
+
+        if (!user) {
+            return res.status(401).json({
+                message: 'User not found',
+                success: false
+            });
+        }
+
+        if (confirmPassword !== newPassword) {
+            return res.status(403).json({
+                message: 'Passwords do not match',
+                success: false
+            });
+        }
+
+        const isPasswordValid = await bcrypt.compare(oldPassword, user.password);
+
+        if (!isPasswordValid) {
+            return res.status(401).json({
+                message: 'Invalid old password',
+                success: false
+            });
+        }
+
+        const hashedPassword = await bcrypt.hash(newPassword, 10);
+        const updatedUser = await User.findbyIdAndUpdate(req.user.id, { password: hashedPassword }, { new: true });
+
+        try {
+            const response = await mailSender(updatedUser.email, "Password Change", `Your password has been changed successfully for ${updatedUser.firstName} ${updatedUser.lastName}`);
+        }
+        catch (error) {
+            console.log(error);
+            console.log('Failed to send password change email');
+            return res.status(500).json({
+                message: 'Failed to send password change email',
+                success: false
+            });
+        }
+
+        return res.status(200).json({
+            message: 'Password changed successfully',
+            success: true
+        });
+    }
+    catch (error) {
+        console.log('Error changing password:', error);
+        res.status(500).json({
             message: 'Internal Server Error',
             success: false
         });
